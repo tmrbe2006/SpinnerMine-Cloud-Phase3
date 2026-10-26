@@ -8,6 +8,8 @@ import {
 } from '../src/utils/installation-id';
 import { computeWorkerStatus, formatLastSeen } from '../src/utils/worker-status';
 import { MiningWorker } from '../src/types';
+import request from 'supertest';
+import { createServerApp, adminAuth, adminDb } from '../server';
 
 describe('Windows Machine Identity & Worker Deduplication', () => {
   const mockUid = 'qBPFqVEeu7Z9';
@@ -481,6 +483,252 @@ describe('Windows Machine Identity & Worker Deduplication', () => {
       // Strictly verify it does NOT generate a third ID like w_qBPFqVEe_4d1e7051
       expect(resolvedWorkerId).not.toBe('w_qBPFqVEe_4d1e7051');
       expect(resolvedWorkerId).not.toBe('w_GyAldfJ5_ty');
+    });
+  });
+
+  describe('5. Express Server Worker Merge & Ownership Security Gate', () => {
+    const app = createServerApp();
+    const mockUserUid = 'user_tm_owner_123';
+    const mockStrangerUid = 'user_stranger_456';
+
+    it('rejects POST /api/workers/merge without Authorization Bearer token with 401', async () => {
+      const res = await request(app)
+        .post('/api/workers/merge')
+        .send({
+          primaryWorkerId: 'w_qBPFqVEe_tm',
+          secondaryWorkerId: 'w_GyAldfJ5_ty'
+        });
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toContain('Unauthorized');
+    });
+
+    it('rejects merging a worker into itself with 400', async () => {
+      vi.spyOn(adminAuth, 'verifyIdToken').mockResolvedValueOnce({
+        uid: mockUserUid,
+        email: 'miner@spinnermine.cloud',
+        admin: false,
+        role: 'user',
+        auth_time: Math.floor(Date.now() / 1000),
+        iss: 'https://securetoken.google.com/spinnermine',
+        aud: 'spinnermine',
+        sub: mockUserUid,
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        firebase: { identities: {}, sign_in_provider: 'google.com' }
+      });
+
+      const res = await request(app)
+        .post('/api/workers/merge')
+        .set('Authorization', 'Bearer valid_user_jwt')
+        .send({
+          primaryWorkerId: 'w_qBPFqVEe_tm',
+          secondaryWorkerId: 'w_qBPFqVEe_tm'
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('Cannot merge a worker into itself');
+    });
+
+    it('Requirement 4: Strictly forbids merging workers belonging to different users (CROSS_USER_MERGE_FORBIDDEN) with 403', async () => {
+      vi.spyOn(adminAuth, 'verifyIdToken').mockResolvedValueOnce({
+        uid: mockUserUid,
+        email: 'miner@spinnermine.cloud',
+        admin: false,
+        role: 'user',
+        auth_time: Math.floor(Date.now() / 1000),
+        iss: 'https://securetoken.google.com/spinnermine',
+        aud: 'spinnermine',
+        sub: mockUserUid,
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        firebase: { identities: {}, sign_in_provider: 'google.com' }
+      });
+
+      // Mock Firestore returning primary owned by mockUserUid, but secondary owned by mockStrangerUid
+      const mockDoc = (id: string, exists: boolean, data: any) => ({
+        id,
+        exists,
+        data: () => data,
+        ref: { id }
+      });
+
+      vi.spyOn(adminDb, 'collection').mockImplementation((colName: string): any => {
+        if (colName === 'miningWorkers') {
+          return {
+            doc: (docId: string) => ({
+              get: vi.fn().mockImplementation(async () => {
+                if (docId === 'w_qBPFqVEe_tm') {
+                  return mockDoc('w_qBPFqVEe_tm', true, { userId: mockUserUid, name: 'tm' });
+                }
+                if (docId === 'w_other_device') {
+                  return mockDoc('w_other_device', true, { userId: mockStrangerUid, name: 'stranger_pc' });
+                }
+                return mockDoc(docId, false, null);
+              }),
+              set: vi.fn().mockResolvedValue({})
+            })
+          } as any;
+        }
+        return {
+          where: vi.fn().mockReturnThis(),
+          get: vi.fn().mockResolvedValue({ empty: true, size: 0, docs: [] })
+        } as any;
+      });
+
+      const res = await request(app)
+        .post('/api/workers/merge')
+        .set('Authorization', 'Bearer valid_user_jwt')
+        .send({
+          primaryWorkerId: 'w_qBPFqVEe_tm',
+          secondaryWorkerId: 'w_other_device'
+        });
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('CROSS_USER_MERGE_FORBIDDEN');
+    });
+
+    it('Requirement 3: Rejects merge if caller is not the owner (PERMISSION_DENIED) with 403', async () => {
+      vi.spyOn(adminAuth, 'verifyIdToken').mockResolvedValueOnce({
+        uid: mockStrangerUid, // Stranger tries to merge mockUserUid's devices
+        email: 'stranger@spinnermine.cloud',
+        admin: false,
+        role: 'user',
+        auth_time: Math.floor(Date.now() / 1000),
+        iss: 'https://securetoken.google.com/spinnermine',
+        aud: 'spinnermine',
+        sub: mockStrangerUid,
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        firebase: { identities: {}, sign_in_provider: 'google.com' }
+      });
+
+      const mockDoc = (id: string, exists: boolean, data: any) => ({
+        id,
+        exists,
+        data: () => data,
+        ref: { id }
+      });
+
+      vi.spyOn(adminDb, 'collection').mockImplementation((colName: string): any => {
+        if (colName === 'miningWorkers') {
+          return {
+            doc: (docId: string) => ({
+              get: vi.fn().mockImplementation(async () => {
+                return mockDoc(docId, true, { userId: mockUserUid, name: 'user_device' });
+              }),
+              set: vi.fn().mockResolvedValue({})
+            })
+          } as any;
+        }
+        return {
+          where: vi.fn().mockReturnThis(),
+          get: vi.fn().mockResolvedValue({ empty: true, size: 0, docs: [] })
+        } as any;
+      });
+
+      const res = await request(app)
+        .post('/api/workers/merge')
+        .set('Authorization', 'Bearer stranger_jwt')
+        .send({
+          primaryWorkerId: 'w_qBPFqVEe_tm',
+          secondaryWorkerId: 'w_GyAldfJ5_ty'
+        });
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('PERMISSION_DENIED');
+    });
+
+    it('Requirement 5 & 6: Executes merge safely with zero financial impact, preserving document and retained shares', async () => {
+      vi.spyOn(adminAuth, 'verifyIdToken').mockResolvedValueOnce({
+        uid: mockUserUid,
+        email: 'owner@spinnermine.cloud',
+        admin: false,
+        role: 'user',
+        auth_time: Math.floor(Date.now() / 1000),
+        iss: 'https://securetoken.google.com/spinnermine',
+        aud: 'spinnermine',
+        sub: mockUserUid,
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        firebase: { identities: {}, sign_in_provider: 'google.com' }
+      });
+
+      let updatedData: any = null;
+      const mockDoc = (id: string, exists: boolean, data: any) => ({
+        id,
+        exists,
+        data: () => data,
+        ref: { id }
+      });
+
+      vi.spyOn(adminDb, 'collection').mockImplementation((colName: string): any => {
+        if (colName === 'miningWorkers') {
+          return {
+            doc: (docId: string) => ({
+              get: vi.fn().mockImplementation(async () => {
+                if (docId === 'w_qBPFqVEe_tm') {
+                  return mockDoc('w_qBPFqVEe_tm', true, { userId: mockUserUid, name: 'tm', acceptedShares: 120 });
+                }
+                if (docId === 'w_GyAldfJ5_ty') {
+                  return mockDoc('w_GyAldfJ5_ty', true, { userId: mockUserUid, name: 'ty', acceptedShares: 15 });
+                }
+                return mockDoc(docId, false, null);
+              }),
+              set: vi.fn().mockImplementation(async (payload, opts) => {
+                updatedData = payload;
+                return {};
+              })
+            })
+          } as any;
+        }
+        if (colName === 'miningSessions') {
+          return {
+            where: vi.fn().mockReturnThis(),
+            get: vi.fn().mockResolvedValue({
+              empty: false,
+              size: 2,
+              docs: [
+                { ref: { id: 'sess_1' }, data: () => ({ sessionId: 'sess_1', workerId: 'w_GyAldfJ5_ty' }) },
+                { ref: { id: 'sess_2' }, data: () => ({ sessionId: 'sess_2', workerId: 'w_GyAldfJ5_ty' }) }
+              ]
+            })
+          } as any;
+        }
+        return {
+          where: vi.fn().mockReturnThis(),
+          get: vi.fn().mockResolvedValue({ empty: true, size: 0, docs: [] })
+        } as any;
+      });
+
+      vi.spyOn(adminDb, 'batch').mockReturnValue({
+        update: vi.fn(),
+        commit: vi.fn().mockResolvedValue([])
+      } as any);
+
+      const res = await request(app)
+        .post('/api/workers/merge')
+        .set('Authorization', 'Bearer valid_owner_jwt')
+        .send({
+          primaryWorkerId: 'w_qBPFqVEe_tm',
+          secondaryWorkerId: 'w_GyAldfJ5_ty',
+          reason: 'Duplicate device resolved'
+        });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.primaryWorkerId).toBe('w_qBPFqVEe_tm');
+      expect(res.body.mergedWorkerId).toBe('w_GyAldfJ5_ty');
+      expect(res.body.financialBalanceImpact).toBe(0);
+      expect(res.body.retainedAcceptedShares).toBe(15);
+      expect(res.body.auditedSessionsCount).toBe(2);
+
+      // Verify secondary document was marked as archived and linked to tm, NOT deleted!
+      expect(updatedData).toBeDefined();
+      expect(updatedData.mergedInto).toBe('w_qBPFqVEe_tm');
+      expect(updatedData.isArchived).toBe(true);
+      expect(updatedData.status).toBe('archived');
+      expect(updatedData.archiveReason).toBe('Duplicate device resolved');
     });
   });
 });

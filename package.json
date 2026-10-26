@@ -23,7 +23,7 @@
     "verify:mining": "tsx scripts/verify-real-mining.ts",
     "test:windows-lifecycle": "npm run build:electron-web && tsx tests/windows-lifecycle-check.ts",
     "test:workers": "npm --prefix workers test",
-    "deploy:worker": "wrangler deploy",
+    "deploy:worker": "npm --prefix workers run deploy",
     "set-admin": "tsx scripts/set-admin.ts"
   },
   "dependencies": {

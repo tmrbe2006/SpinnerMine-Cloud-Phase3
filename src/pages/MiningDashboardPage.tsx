@@ -2819,12 +2819,15 @@ gcloud run deploy spinnermine-backend \
         onClose={() => setShowDuplicateModal(false)}
         groups={duplicateGroups}
         workers={workers}
-        idToken={currentUser ? undefined : undefined}
+        getIdToken={async (forceRefresh) => {
+          if (!currentUser) return null;
+          return await currentUser.getIdToken(Boolean(forceRefresh));
+        }}
         onResolved={async () => {
           setShowDuplicateModal(false);
           if (currentUser) {
             try {
-              const idToken = await currentUser.getIdToken();
+              const idToken = await currentUser.getIdToken(true);
               const res = await getDuplicateWorkers(idToken);
               if (res.success) {
                 setDuplicateGroups(res.groups);

@@ -512,13 +512,21 @@ export async function archiveWorker(
   reason?: string,
   idToken?: string
 ): Promise<{ success: boolean; workerId?: string; message?: string; error?: string }> {
+  // Requirement 4: Strictly disallow dispatch if missing or invalid token
+  if (!idToken || typeof idToken !== 'string' || !idToken.trim()) {
+    return {
+      success: false,
+      error: 'Missing or invalid Firebase authentication token. Please sign in.'
+    };
+  }
+
   const res = await apiFetch<any>(
     '/api/workers/archive',
     {
       method: 'POST',
       body: JSON.stringify({ workerId, reason })
     },
-    idToken
+    idToken.trim()
   );
   if (res.ok && res.data) {
     return res.data;
@@ -546,13 +554,21 @@ export async function mergeWorkers(
   retainedAcceptedShares?: number;
   auditedSessionsCount?: number;
 }> {
+  // Requirement 4: Strictly disallow dispatch if missing or invalid token
+  if (!idToken || typeof idToken !== 'string' || !idToken.trim()) {
+    return {
+      success: false,
+      error: 'Missing or invalid Firebase authentication token. Please sign in.'
+    };
+  }
+
   const res = await apiFetch<any>(
     '/api/workers/merge',
     {
       method: 'POST',
       body: JSON.stringify({ primaryWorkerId, secondaryWorkerId, reason })
     },
-    idToken
+    idToken.trim()
   );
   if (res.ok && res.data) {
     return res.data;

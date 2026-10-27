@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { MiningWorker } from '../../types';
+import { useAuth } from '../../context/AuthContext';
 import { useLanguage } from '../../context/LanguageContext';
 import { getShortInstallationId } from '../../utils/installation-id';
 import { mergeWorkers, archiveWorker } from '../../services/apiClient';
@@ -32,6 +33,7 @@ interface DuplicateWorkerResolverModalProps {
   groups: DuplicateGroupItem[];
   workers: MiningWorker[];
   idToken?: string;
+  getIdToken?: (forceRefresh?: boolean) => Promise<string | null>;
   onResolved: () => void;
 }
 
@@ -41,19 +43,96 @@ export const DuplicateWorkerResolverModal: React.FC<DuplicateWorkerResolverModal
   groups,
   workers,
   idToken,
+  getIdToken,
   onResolved
 }) => {
   const { language } = useLanguage();
+  const { currentUser } = useAuth();
   const [processingId, setProcessingId] = useState<string | null>(null);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   if (!isOpen) return null;
 
+  // Requirement 3: Safe token acquisition helper with force-refresh support
+  const resolveFreshToken = async (forceRefresh = false): Promise<string | null> => {
+    // 1. Caller supplied getIdToken callback
+    if (getIdToken) {
+      try {
+        const token = await getIdToken(forceRefresh);
+        if (token && token.trim()) return token.trim();
+      } catch (err) {
+        console.warn('[Duplicate Resolver] getIdToken prop failed:', err);
+      }
+    }
+    // 2. Direct from Firebase Auth currentUser
+    if (currentUser) {
+      try {
+        const token = await currentUser.getIdToken(forceRefresh);
+        if (token && token.trim()) return token.trim();
+      } catch (err) {
+        console.warn('[Duplicate Resolver] currentUser.getIdToken failed:', err);
+      }
+    }
+    // 3. Fallback to idToken prop if not forcing refresh
+    if (!forceRefresh && idToken && typeof idToken === 'string' && idToken.trim()) {
+      return idToken.trim();
+    }
+    return null;
+  };
+
   const handleMerge = async (primaryId: string, secondaryId: string) => {
     setProcessingId(secondaryId);
     setFeedback(null);
+
+    // Requirement 2 & 4: Strictly disallow action if no authenticated user
+    if (!currentUser) {
+      setFeedback({
+        type: 'error',
+        message: language === 'ar'
+          ? 'انتهت جلسة تسجيل الدخول أو لم يتم تسجيل الدخول. يرجى تسجيل الدخول مجددًا للمتابعة بأمان.'
+          : 'Session expired or not signed in. Please sign in again to continue safely.'
+      });
+      setProcessingId(null);
+      return;
+    }
+
+    // Requirement 3: Fetch fresh token prior to operation
+    let token = await resolveFreshToken(false);
+    if (!token) {
+      token = await resolveFreshToken(true);
+    }
+
+    // Requirement 4: Never send request without a valid token
+    if (!token) {
+      setFeedback({
+        type: 'error',
+        message: language === 'ar'
+          ? 'انتهت صلاحية جلسة تسجيل الدخول. يرجى إعادة تسجيل الدخول لتأكيد هويتك وأمان حسابك.'
+          : 'Your session has expired. Please sign in again to verify your identity.'
+      });
+      setProcessingId(null);
+      return;
+    }
+
     try {
-      const res = await mergeWorkers(primaryId, secondaryId, `Merged via duplicate resolver`, idToken);
+      let res = await mergeWorkers(primaryId, secondaryId, 'Merged via duplicate resolver', token);
+
+      // Requirement 3: Safe retry on session expiration
+      const isAuthError = !res.success && (
+        res.error?.includes('Unauthorized') ||
+        res.error?.includes('Token') ||
+        res.error?.includes('token') ||
+        res.error?.includes('expired') ||
+        res.error?.includes('401')
+      );
+
+      if (isAuthError) {
+        const forcedToken = await resolveFreshToken(true);
+        if (forcedToken) {
+          res = await mergeWorkers(primaryId, secondaryId, 'Merged via duplicate resolver (retry)', forcedToken);
+        }
+      }
+
       if (res.success) {
         const auditNote = res.retainedAcceptedShares !== undefined 
           ? (language === 'ar' ? ` [الأسهم المحفوظة للتدقيق: ${res.retainedAcceptedShares}، الجلسات المفحوصة: ${res.auditedSessionsCount || 0}]` : ` [Audited Shares: ${res.retainedAcceptedShares}, Linked Sessions: ${res.auditedSessionsCount || 0}]`)
@@ -68,9 +147,21 @@ export const DuplicateWorkerResolverModal: React.FC<DuplicateWorkerResolverModal
           onResolved();
         }, 1600);
       } else {
+        const isStillAuthError = (
+          res.error?.includes('Unauthorized') ||
+          res.error?.includes('Token') ||
+          res.error?.includes('token') ||
+          res.error?.includes('expired') ||
+          res.error?.includes('401')
+        );
+
         setFeedback({
           type: 'error',
-          message: res.error || (language === 'ar' ? 'فشل دمج الأجهزة' : 'Failed to merge devices')
+          message: isStillAuthError
+            ? (language === 'ar'
+                ? 'انتهت جلسة تسجيل الدخول أو الرمز غير صالح. يرجى تسجيل الدخول مرة أخرى للمتابعة.'
+                : 'Session expired or invalid authentication token. Please sign in again.')
+            : (res.error || (language === 'ar' ? 'فشل دمج الأجهزة' : 'Failed to merge devices'))
         });
       }
     } catch (err: any) {
@@ -86,8 +177,56 @@ export const DuplicateWorkerResolverModal: React.FC<DuplicateWorkerResolverModal
   const handleArchive = async (workerId: string) => {
     setProcessingId(workerId);
     setFeedback(null);
+
+    // Requirement 2 & 4: Strictly disallow action if no authenticated user
+    if (!currentUser) {
+      setFeedback({
+        type: 'error',
+        message: language === 'ar'
+          ? 'انتهت جلسة تسجيل الدخول أو لم يتم تسجيل الدخول. يرجى تسجيل الدخول مجددًا للمتابعة بأمان.'
+          : 'Session expired or not signed in. Please sign in again to continue safely.'
+      });
+      setProcessingId(null);
+      return;
+    }
+
+    // Requirement 3: Fetch fresh token prior to operation
+    let token = await resolveFreshToken(false);
+    if (!token) {
+      token = await resolveFreshToken(true);
+    }
+
+    // Requirement 4: Never send request without a valid token
+    if (!token) {
+      setFeedback({
+        type: 'error',
+        message: language === 'ar'
+          ? 'انتهت صلاحية جلسة تسجيل الدخول. يرجى إعادة تسجيل الدخول لتأكيد هويتك وأمان حسابك.'
+          : 'Your session has expired. Please sign in again to verify your identity.'
+      });
+      setProcessingId(null);
+      return;
+    }
+
     try {
-      const res = await archiveWorker(workerId, 'Archived via duplicate resolver', idToken);
+      let res = await archiveWorker(workerId, 'Archived via duplicate resolver', token);
+
+      // Requirement 3: Safe retry on session expiration
+      const isAuthError = !res.success && (
+        res.error?.includes('Unauthorized') ||
+        res.error?.includes('Token') ||
+        res.error?.includes('token') ||
+        res.error?.includes('expired') ||
+        res.error?.includes('401')
+      );
+
+      if (isAuthError) {
+        const forcedToken = await resolveFreshToken(true);
+        if (forcedToken) {
+          res = await archiveWorker(workerId, 'Archived via duplicate resolver (retry)', forcedToken);
+        }
+      }
+
       if (res.success) {
         setFeedback({
           type: 'success',
@@ -99,9 +238,21 @@ export const DuplicateWorkerResolverModal: React.FC<DuplicateWorkerResolverModal
           onResolved();
         }, 1200);
       } else {
+        const isStillAuthError = (
+          res.error?.includes('Unauthorized') ||
+          res.error?.includes('Token') ||
+          res.error?.includes('token') ||
+          res.error?.includes('expired') ||
+          res.error?.includes('401')
+        );
+
         setFeedback({
           type: 'error',
-          message: res.error || (language === 'ar' ? 'فشلت الأرشفة' : 'Archiving failed')
+          message: isStillAuthError
+            ? (language === 'ar'
+                ? 'انتهت جلسة تسجيل الدخول أو الرمز غير صالح. يرجى تسجيل الدخول مرة أخرى للمتابعة.'
+                : 'Session expired or invalid authentication token. Please sign in again.')
+            : (res.error || (language === 'ar' ? 'فشلت الأرشفة' : 'Archiving failed'))
         });
       }
     } catch (err: any) {

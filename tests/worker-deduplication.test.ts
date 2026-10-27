@@ -8,6 +8,7 @@ import {
 } from '../src/utils/installation-id';
 import { computeWorkerStatus, formatLastSeen } from '../src/utils/worker-status';
 import { MiningWorker } from '../src/types';
+import { archiveWorker, mergeWorkers } from '../src/services/apiClient';
 import request from 'supertest';
 import { createServerApp, adminAuth, adminDb } from '../server';
 
@@ -729,6 +730,147 @@ describe('Windows Machine Identity & Worker Deduplication', () => {
       expect(updatedData.isArchived).toBe(true);
       expect(updatedData.status).toBe('archived');
       expect(updatedData.archiveReason).toBe('Duplicate device resolved');
+    });
+
+    it('Missing Token: Client mergeWorkers strictly rejects request before dispatch if token is missing or empty', async () => {
+      const res1 = await mergeWorkers('w_qBPFqVEe_tm', 'w_GyAldfJ5_ty', 'test', undefined);
+      expect(res1.success).toBe(false);
+      expect(res1.error).toContain('Missing or invalid Firebase authentication token');
+
+      const res2 = await mergeWorkers('w_qBPFqVEe_tm', 'w_GyAldfJ5_ty', 'test', '   ');
+      expect(res2.success).toBe(false);
+      expect(res2.error).toContain('Missing or invalid Firebase authentication token');
+    });
+
+    it('Missing Token: Client archiveWorker strictly rejects request before dispatch if token is missing or empty', async () => {
+      const res1 = await archiveWorker('w_GyAldfJ5_ty', 'test', undefined);
+      expect(res1.success).toBe(false);
+      expect(res1.error).toContain('Missing or invalid Firebase authentication token');
+
+      const res2 = await archiveWorker('w_GyAldfJ5_ty', 'test', '');
+      expect(res2.success).toBe(false);
+      expect(res2.error).toContain('Missing or invalid Firebase authentication token');
+    });
+
+    it('Missing Token: Server POST /api/workers/archive returns 401 Unauthorized without Bearer token', async () => {
+      const res = await request(app)
+        .post('/api/workers/archive')
+        .send({ workerId: 'w_GyAldfJ5_ty' });
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toContain('Missing or invalid Authorization Bearer token');
+    });
+
+    it('Expired Token: Server POST /api/workers/archive returns 401 Unauthorized when token verification throws expired error', async () => {
+      vi.spyOn(adminAuth, 'verifyIdToken').mockRejectedValueOnce(new Error('Firebase ID token has expired. Get a fresh ID token.'));
+
+      const res = await request(app)
+        .post('/api/workers/archive')
+        .set('Authorization', 'Bearer expired_token_xyz')
+        .send({ workerId: 'w_GyAldfJ5_ty' });
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toContain('Token verification failed: Firebase ID token has expired');
+    });
+
+    it('Expired Token: Server POST /api/workers/merge returns 401 Unauthorized when token is expired', async () => {
+      vi.spyOn(adminAuth, 'verifyIdToken').mockRejectedValueOnce(new Error('Firebase ID token has expired. Get a fresh ID token.'));
+
+      const res = await request(app)
+        .post('/api/workers/merge')
+        .set('Authorization', 'Bearer expired_token_xyz')
+        .send({ primaryWorkerId: 'w_qBPFqVEe_tm', secondaryWorkerId: 'w_GyAldfJ5_ty' });
+
+      expect(res.status).toBe(401);
+      expect(res.body.error).toContain('Token verification failed: Firebase ID token has expired');
+    });
+
+    it('Wrong User: Server POST /api/workers/archive returns 403 when caller does not own the worker', async () => {
+      vi.spyOn(adminAuth, 'verifyIdToken').mockResolvedValueOnce({
+        uid: 'user_stranger_999',
+        email: 'stranger@spinnermine.cloud',
+        admin: false,
+        role: 'user',
+        auth_time: Math.floor(Date.now() / 1000),
+        iss: 'https://securetoken.google.com/spinnermine',
+        aud: 'spinnermine',
+        sub: 'user_stranger_999',
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        firebase: { identities: {}, sign_in_provider: 'google.com' }
+      });
+
+      vi.spyOn(adminDb, 'collection').mockImplementation((colName: string): any => {
+        if (colName === 'miningWorkers') {
+          return {
+            doc: (docId: string) => ({
+              get: vi.fn().mockResolvedValue({
+                id: docId,
+                exists: true,
+                data: () => ({ userId: mockUserUid, name: 'ty' }) // owned by mockUserUid, not user_stranger_999
+              })
+            })
+          } as any;
+        }
+        return { doc: vi.fn() } as any;
+      });
+
+      const res = await request(app)
+        .post('/api/workers/archive')
+        .set('Authorization', 'Bearer stranger_token')
+        .send({ workerId: 'w_GyAldfJ5_ty' });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain('You do not own this worker device');
+    });
+
+    it('Successful Archive: Server POST /api/workers/archive marks worker as archived with audit reason without document deletion', async () => {
+      vi.spyOn(adminAuth, 'verifyIdToken').mockResolvedValueOnce({
+        uid: mockUserUid,
+        email: 'owner@spinnermine.cloud',
+        admin: false,
+        role: 'user',
+        auth_time: Math.floor(Date.now() / 1000),
+        iss: 'https://securetoken.google.com/spinnermine',
+        aud: 'spinnermine',
+        sub: mockUserUid,
+        iat: Math.floor(Date.now() / 1000),
+        exp: Math.floor(Date.now() / 1000) + 3600,
+        firebase: { identities: {}, sign_in_provider: 'google.com' }
+      });
+
+      let archivedPayload: any = null;
+      vi.spyOn(adminDb, 'collection').mockImplementation((colName: string): any => {
+        if (colName === 'miningWorkers') {
+          return {
+            doc: (docId: string) => ({
+              get: vi.fn().mockResolvedValue({
+                id: docId,
+                exists: true,
+                data: () => ({ userId: mockUserUid, name: 'ty', acceptedShares: 10 })
+              }),
+              set: vi.fn().mockImplementation(async (payload) => {
+                archivedPayload = payload;
+                return {};
+              })
+            })
+          } as any;
+        }
+        return { doc: vi.fn() } as any;
+      });
+
+      const res = await request(app)
+        .post('/api/workers/archive')
+        .set('Authorization', 'Bearer valid_owner_jwt')
+        .send({ workerId: 'w_GyAldfJ5_ty', reason: 'User resolved duplicate' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.success).toBe(true);
+      expect(res.body.workerId).toBe('w_GyAldfJ5_ty');
+      expect(archivedPayload).toBeDefined();
+      expect(archivedPayload.isArchived).toBe(true);
+      expect(archivedPayload.status).toBe('archived');
+      expect(archivedPayload.archiveReason).toBe('User resolved duplicate');
     });
   });
 });

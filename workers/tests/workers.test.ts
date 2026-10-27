@@ -652,7 +652,7 @@ describe('Cloudflare Worker - Worker Registration & Telemetry', () => {
       expect(body.code).toBe('NOT_FOUND');
     });
 
-    it('returns HTTP 401 when merge request is unauthenticated', async () => {
+    it('returns HTTP 401 when merge request has Missing Token', async () => {
       const req = new Request('https://worker.spinnermine.workers.dev/api/workers/merge', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -664,6 +664,110 @@ describe('Cloudflare Worker - Worker Registration & Telemetry', () => {
 
       const res = await worker.fetch(req, env);
       expect(res.status).toBe(401);
+      const body: any = await res.json();
+      expect(body.error).toContain('Missing or invalid Authorization Bearer token');
+    });
+
+    it('returns HTTP 401 when archive request has Missing Token', async () => {
+      const req = new Request('https://worker.spinnermine.workers.dev/api/workers/archive', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workerId: 'w_GyAldfJ5_ty'
+        })
+      });
+
+      const res = await worker.fetch(req, env);
+      expect(res.status).toBe(401);
+      const body: any = await res.json();
+      expect(body.error).toContain('Missing or invalid Authorization Bearer token');
+    });
+
+    it('returns HTTP 401 when merge request provides an Expired Token', async () => {
+      const expiredToken = await createMockFirebaseIdToken(keyPair, {
+        uid: 'user_tm_owner',
+        exp: Math.floor(Date.now() / 1000) - 120
+      });
+
+      const req = new Request('https://worker.spinnermine.workers.dev/api/workers/merge', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${expiredToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          primaryWorkerId: 'w_qBPFqVEe_tm',
+          secondaryWorkerId: 'w_GyAldfJ5_ty'
+        })
+      });
+
+      const res = await worker.fetch(req, env);
+      expect(res.status).toBe(401);
+      const body: any = await res.json();
+      expect(body.error).toContain('Token has expired');
+    });
+
+    it('returns HTTP 401 when archive request provides an Expired Token', async () => {
+      const expiredToken = await createMockFirebaseIdToken(keyPair, {
+        uid: 'user_tm_owner',
+        exp: Math.floor(Date.now() / 1000) - 120
+      });
+
+      const req = new Request('https://worker.spinnermine.workers.dev/api/workers/archive', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${expiredToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          workerId: 'w_GyAldfJ5_ty'
+        })
+      });
+
+      const res = await worker.fetch(req, env);
+      expect(res.status).toBe(401);
+      const body: any = await res.json();
+      expect(body.error).toContain('Token has expired');
+    });
+
+    it('rejects merge when caller is Wrong User with HTTP 403', async () => {
+      // otherUserToken caller (user_stranger) attempts to merge tm and ty owned by user_tm_owner
+      const req = new Request('https://worker.spinnermine.workers.dev/api/workers/merge', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${otherUserToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          primaryWorkerId: 'w_qBPFqVEe_tm',
+          secondaryWorkerId: 'w_GyAldfJ5_ty'
+        })
+      });
+
+      const res = await worker.fetch(req, env);
+      expect(res.status).toBe(403);
+      const body: any = await res.json();
+      expect(body.code).toBe('PERMISSION_DENIED');
+      expect(body.error).toContain('You do not own');
+    });
+
+    it('rejects archive when caller is Wrong User with HTTP 403', async () => {
+      // user_stranger attempts to archive w_GyAldfJ5_ty owned by user_tm_owner
+      const req = new Request('https://worker.spinnermine.workers.dev/api/workers/archive', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${otherUserToken}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          workerId: 'w_GyAldfJ5_ty'
+        })
+      });
+
+      const res = await worker.fetch(req, env);
+      expect(res.status).toBe(403);
+      const body: any = await res.json();
+      expect(body.error).toContain('You do not own this worker device');
     });
 
     it('successfully archives worker safely without deleting document', async () => {
@@ -687,22 +791,6 @@ describe('Cloudflare Worker - Worker Registration & Telemetry', () => {
       expect(doc.isArchived).toBe(true);
       expect(doc.status).toBe('archived');
       expect(doc.archiveReason).toBe('Manual user archival');
-    });
-
-    it('rejects archiving another user worker with HTTP 403', async () => {
-      const req = new Request('https://worker.spinnermine.workers.dev/api/workers/archive', {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${userToken}`,
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          workerId: 'w_other_user_rig'
-        })
-      });
-
-      const res = await worker.fetch(req, env);
-      expect(res.status).toBe(403);
     });
 
     it('Requirement 8: Re-registering the same Windows machine reuses tm and strictly prevents 3rd worker creation', async () => {

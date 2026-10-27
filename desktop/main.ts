@@ -42,29 +42,94 @@ if (!isSmokeTest) {
 
 import crypto from 'crypto';
 
+interface DeviceIdentityRecord {
+  installationId: string;
+  createdAt: string;
+  platform: string;
+  version: string;
+}
+
+function getDeviceIdentityFilePath(): string {
+  const userDataDir = app.getPath('userData');
+  return path.join(userDataDir, 'device-identity.json');
+}
+
 function getSettingsFilePath(): string {
   const userDataDir = app.getPath('userData');
   return path.join(userDataDir, 'spinnermine_settings.json');
 }
 
-function generateInstallationId(): string {
-  return `inst_${crypto.randomBytes(8).toString('hex')}`;
+function generateSecureInstallationId(): string {
+  // Requirement 2: Cryptographically secure UUID-based permanent installation identifier
+  if (typeof crypto.randomUUID === 'function') {
+    return `inst_${crypto.randomUUID()}`;
+  }
+  return `inst_${crypto.randomBytes(16).toString('hex')}`;
+}
+
+export function loadPermanentDeviceIdentity(): DeviceIdentityRecord {
+  const identityPath = getDeviceIdentityFilePath();
+  try {
+    if (fs.existsSync(identityPath)) {
+      const raw = fs.readFileSync(identityPath, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.installationId === 'string' && parsed.installationId.startsWith('inst_')) {
+        return parsed;
+      }
+    }
+  } catch (err) {
+    console.warn('[desktop:main] Error reading device-identity.json:', err);
+  }
+
+  // Fallback / migration check from legacy settings file
+  let candidateId: string | null = null;
+  try {
+    const settingsPath = getSettingsFilePath();
+    if (fs.existsSync(settingsPath)) {
+      const settingsRaw = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+      if (settingsRaw && typeof settingsRaw.installationId === 'string' && settingsRaw.installationId.startsWith('inst_')) {
+        candidateId = settingsRaw.installationId;
+      }
+    }
+  } catch {}
+
+  const finalId = candidateId || generateSecureInstallationId();
+  const identityRecord: DeviceIdentityRecord = {
+    installationId: finalId,
+    createdAt: new Date().toISOString(),
+    platform: process.platform,
+    version: '1.0.0'
+  };
+
+  try {
+    fs.writeFileSync(identityPath, JSON.stringify(identityRecord, null, 2), 'utf8');
+  } catch (err) {
+    console.error('[desktop:main] Failed to persist permanent device-identity.json:', err);
+  }
+
+  return identityRecord;
+}
+
+function getPermanentInstallationId(): string {
+  const identity = loadPermanentDeviceIdentity();
+  return identity.installationId;
 }
 
 function loadSavedSettings(): Record<string, any> {
+  const permanentId = getPermanentInstallationId();
   try {
     const filePath = getSettingsFilePath();
     if (fs.existsSync(filePath)) {
       const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-      if (!data.installationId || typeof data.installationId !== 'string') {
-        data.installationId = generateInstallationId();
+      if (data.installationId !== permanentId) {
+        data.installationId = permanentId;
         saveUserSettings(data);
       }
       return data;
     }
   } catch {}
   const initial = {
-    installationId: generateInstallationId(),
+    installationId: permanentId,
     threads: Math.max(1, Math.floor(os.cpus().length / 2)),
     throttle: 50,
     minimizeToTray: false,
@@ -78,6 +143,8 @@ function loadSavedSettings(): Record<string, any> {
 function saveUserSettings(settings: Record<string, any>): boolean {
   try {
     const filePath = getSettingsFilePath();
+    // Guarantee installationId matches permanent device identity
+    settings.installationId = getPermanentInstallationId();
     fs.writeFileSync(filePath, JSON.stringify(settings, null, 2), 'utf8');
     return true;
   } catch {
@@ -451,8 +518,11 @@ ipcMain.handle('mining:get-system-info', async () => {
 });
 
 ipcMain.handle('mining:get-installation-id', async () => {
-  const settings = loadSavedSettings();
-  return settings.installationId;
+  return getPermanentInstallationId();
+});
+
+ipcMain.handle('app:get-device-identity', async () => {
+  return loadPermanentDeviceIdentity();
 });
 
 ipcMain.handle('mining:detect-xmrig', async () => {

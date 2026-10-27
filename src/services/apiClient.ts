@@ -605,6 +605,48 @@ export async function renameWorker(
   };
 }
 
+/**
+ * Links a permanent installation ID to an existing worker with user consent and authentication.
+ */
+export async function linkWorkerInstallation(
+  workerId: string,
+  installationId: string,
+  idToken?: string,
+  consentConfirmed: boolean = true
+): Promise<{
+  success: boolean;
+  workerId?: string;
+  installationId?: string;
+  name?: string;
+  retainedAcceptedShares?: number;
+  financialBalanceImpact?: number;
+  message?: string;
+  error?: string;
+}> {
+  if (!idToken || typeof idToken !== 'string' || !idToken.trim()) {
+    return {
+      success: false,
+      error: 'Missing or invalid Firebase authentication token. Please sign in.'
+    };
+  }
+
+  const res = await apiFetch<any>(
+    '/api/workers/link-installation',
+    {
+      method: 'POST',
+      body: JSON.stringify({ workerId, installationId, consentConfirmed })
+    },
+    idToken.trim()
+  );
+  if (res.ok && res.data) {
+    return res.data;
+  }
+  return {
+    success: false,
+    error: res.error || 'Failed to link installation ID'
+  };
+}
+
 export const apiClient = {
   getBackendBaseUrl,
   setCustomBackendUrl,
@@ -620,5 +662,6 @@ export const apiClient = {
   getDuplicateWorkers,
   archiveWorker,
   mergeWorkers,
-  renameWorker
+  renameWorker,
+  linkWorkerInstallation
 };

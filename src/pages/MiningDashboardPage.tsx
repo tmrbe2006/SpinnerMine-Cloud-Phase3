@@ -52,7 +52,8 @@ import {
   getCustomBackendUrl,
   DEFAULT_PRODUCTION_BACKEND_URL,
   getDuplicateWorkers,
-  renameWorker
+  renameWorker,
+  linkWorkerInstallation
 } from '../services/apiClient';
 import {
   computeWorkerStatus,
@@ -168,6 +169,12 @@ export const MiningDashboardPage: React.FC<MiningDashboardPageProps> = ({ onOpen
   const [savingRename, setSavingRename] = useState<boolean>(false);
   const [renameFeedback, setRenameFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
   const [showArchivedSection, setShowArchivedSection] = useState<boolean>(true);
+
+  // Phase 2D.1: Permanent Device Identity Linking State
+  const [linkingWorker, setLinkingWorker] = useState<MiningWorker | null>(null);
+  const [linkingConsent, setLinkingConsent] = useState<boolean>(false);
+  const [isLinking, setIsLinking] = useState<boolean>(false);
+  const [linkNotice, setLinkNotice] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
   // Load persistent installation ID on mount
   useEffect(() => {
@@ -296,6 +303,82 @@ export const MiningDashboardPage: React.FC<MiningDashboardPageProps> = ({ onOpen
         message: err.message || 'Failed to rename worker'
       });
       setSavingRename(false);
+    }
+  };
+
+  const handlePromptLinkInstallation = (worker: MiningWorker) => {
+    setLinkingWorker(worker);
+    setLinkingConsent(false);
+    setLinkNotice(null);
+  };
+
+  const handleConfirmLinkInstallation = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!linkingWorker || isLinking) return;
+
+    if (!currentUser) {
+      setLinkNotice({
+        type: 'error',
+        message: language === 'ar' ? 'يجب تسجيل الدخول أولاً لربط معرف التثبيت الدائم.' : 'Authentication required to link permanent installation ID.'
+      });
+      return;
+    }
+
+    if (!linkingConsent) {
+      setLinkNotice({
+        type: 'error',
+        message: language === 'ar' ? 'يرجى تأكيد الموافقة على شروط ربط المعرف الدائم للمتابعة.' : 'Please confirm your consent to link the permanent installation ID.'
+      });
+      return;
+    }
+
+    setIsLinking(true);
+    setLinkNotice(null);
+
+    try {
+      const idToken = await currentUser.getIdToken(true);
+      const currentInstId = installationId || await getDeviceInstallationId();
+      const targetWorkerId = linkingWorker.workerId || linkingWorker.id || '';
+
+      const res = await linkWorkerInstallation(targetWorkerId, currentInstId, idToken, true);
+      if (res.success) {
+        setLinkNotice({
+          type: 'success',
+          message: language === 'ar'
+            ? `تم بنجاح ربط معرف التثبيت الدائم (${currentInstId}) بجهاز ${linkingWorker.name || targetWorkerId}!`
+            : `Successfully linked permanent installation ID (${currentInstId}) to worker ${linkingWorker.name || targetWorkerId}!`
+        });
+
+        // Update local worker state immediately
+        setWorkers(prev => prev.map(w => {
+          if ((w.workerId && w.workerId === targetWorkerId) || (w.id && w.id === targetWorkerId)) {
+            return {
+              ...w,
+              installationId: currentInstId
+            };
+          }
+          return w;
+        }));
+
+        setTimeout(() => {
+          setLinkingWorker(null);
+          setLinkingConsent(false);
+          setLinkNotice(null);
+          setIsLinking(false);
+        }, 1500);
+      } else {
+        setLinkNotice({
+          type: 'error',
+          message: res.error || (language === 'ar' ? 'فشل ربط المعرف الدائم' : 'Failed to link installation ID')
+        });
+        setIsLinking(false);
+      }
+    } catch (err: any) {
+      setLinkNotice({
+        type: 'error',
+        message: err.message || (language === 'ar' ? 'حدث خطأ أثناء الربط' : 'Error linking installation ID')
+      });
+      setIsLinking(false);
     }
   };
 
@@ -2030,6 +2113,38 @@ export const MiningDashboardPage: React.FC<MiningDashboardPageProps> = ({ onOpen
             >
               <Layers className="w-3.5 h-3.5" />
               <span>{language === 'ar' ? 'حل التكرار الآن' : 'Resolve Duplicates Now'}</span>
+            </button>
+          </div>
+        )}
+
+        {/* Phase 2D.1 Banner: Link Permanent Windows Device Identity for tm or unlinked primary */}
+        {currentUser && workers.some(w => (w.workerId === 'w_qBPFqVEe_tm' || w.name === 'tm') && !w.installationId && !w.isArchived) && (
+          <div className="p-4 rounded-2xl bg-gradient-to-r from-sky-950/70 via-slate-900 to-indigo-950/70 border border-sky-500/40 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-lg">
+            <div className="flex items-start gap-3">
+              <div className="p-2 rounded-xl bg-sky-500/20 border border-sky-500/40 text-sky-400 shrink-0 mt-0.5">
+                <ShieldCheck className="w-5 h-5" />
+              </div>
+              <div>
+                <h4 className="text-xs font-bold text-sky-200">
+                  {language === 'ar' ? 'المرحلة 2D.1: ربط الهوية الدائمة لجهاز Windows الأساسي (tm)' : 'Phase 2D.1: Link Permanent Windows Device Identity for tm'}
+                </h4>
+                <p className="text-[11px] text-slate-300 mt-0.5 leading-relaxed">
+                  {language === 'ar'
+                    ? `الجهاز الأساسي tm (w_qBPFqVEe_tm) متصل حالياً بدون معرف تثبيت دائم (N/A). يمكنك ربطه الآن بتثبيت Windows الدائم (${getShortInstallationId(installationId) || 'inst_...'}) دون إنشاء أي جهاز ثالث أو المساس بالأرصدة.`
+                    : `Primary worker tm (w_qBPFqVEe_tm) is online without permanent installation ID (N/A). Link this Windows installation (${getShortInstallationId(installationId) || 'inst_...'}) securely without altering balances or duplicating devices.`}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                const tm = workers.find(w => (w.workerId === 'w_qBPFqVEe_tm' || w.name === 'tm') && !w.installationId);
+                if (tm) handlePromptLinkInstallation(tm);
+              }}
+              className="px-4 py-2 rounded-xl bg-sky-500 hover:bg-sky-400 text-slate-950 text-xs font-bold transition flex items-center gap-1.5 shrink-0 shadow cursor-pointer"
+            >
+              <ShieldCheck className="w-4 h-4" />
+              <span>{language === 'ar' ? 'ربط المعرف الدائم الآن' : 'Link Permanent ID Now'}</span>
             </button>
           </div>
         )}

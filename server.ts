@@ -994,6 +994,89 @@ export function createServerApp() {
     }
   });
 
+  // Permanent Device Identity Linking Endpoint: Authenticated with Firebase ID Token & User Consent
+  app.post('/api/workers/link-installation', authenticateFirebaseToken, async (req: AuthenticatedRequest, res: Response) => {
+    try {
+      const trustedUid = req.user!.uid;
+      const { workerId, installationId, consentConfirmed } = req.body;
+
+      if (!workerId || typeof workerId !== 'string') {
+        res.status(400).json({ error: 'Valid workerId is required' });
+        return;
+      }
+
+      if (!installationId || typeof installationId !== 'string' || !installationId.startsWith('inst_')) {
+        res.status(400).json({ error: 'Valid installationId starting with inst_ is required' });
+        return;
+      }
+
+      // Requirement 5: Explicit user consent verification
+      if (!consentConfirmed) {
+        res.status(400).json({ error: 'Explicit user consent is required to link permanent installation identity' });
+        return;
+      }
+
+      const safeWorkerId = workerId.trim().replace(/[^a-zA-Z0-9_\-]/g, '');
+      const safeInstallationId = installationId.trim().replace(/[^a-zA-Z0-9_\-]/g, '').slice(0, 64);
+
+      const workerDocRef = adminDb.collection('miningWorkers').doc(safeWorkerId);
+      const docSnap = await workerDocRef.get();
+      if (!docSnap.exists) {
+        res.status(404).json({ error: 'Worker not found' });
+        return;
+      }
+
+      // Requirement 3 & 6: Verify Firebase UID and worker ownership
+      if (docSnap.data()?.userId !== trustedUid && !req.user?.admin) {
+        res.status(403).json({ error: 'Forbidden: You do not own this worker device', code: 'PERMISSION_DENIED' });
+        return;
+      }
+
+      // Check if another active worker already has this installationId under this account
+      const instQuery = await adminDb.collection('miningWorkers')
+        .where('userId', '==', trustedUid)
+        .where('installationId', '==', safeInstallationId)
+        .get();
+
+      const conflictingDoc = instQuery.docs.find(d => {
+        if (d.id === safeWorkerId) return false;
+        const data = d.data();
+        return !data?.isArchived && !data?.mergedInto;
+      });
+
+      if (conflictingDoc) {
+        res.status(409).json({
+          error: `Conflict: Installation ID is already assigned to active worker ${conflictingDoc.id}. Please resolve duplicate devices first.`,
+          code: 'ALREADY_EXISTS'
+        });
+        return;
+      }
+
+      const now = new Date().toISOString();
+      const existingData = docSnap.data() || {};
+      const retainedAcceptedShares = Number(existingData.acceptedShares) || 0;
+
+      // Requirement 4, 9, 10: Preserve workerId, acceptedShares, retain all fields, zero financial impact
+      await workerDocRef.set({
+        installationId: safeInstallationId,
+        installationLinkedAt: now,
+        updatedAt: now
+      }, { merge: true });
+
+      res.json({
+        success: true,
+        workerId: safeWorkerId,
+        installationId: safeInstallationId,
+        name: existingData.name,
+        retainedAcceptedShares,
+        financialBalanceImpact: 0,
+        message: `Permanent installation ID successfully linked to worker ${safeWorkerId}.`
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: `Failed to link installation ID: ${err.message}` });
+    }
+  });
+
   // Duplicate Discovery & Audit Endpoint: Audits workers and linked sessions
   app.get('/api/workers/duplicates', authenticateFirebaseToken, async (req: AuthenticatedRequest, res: Response) => {
     try {

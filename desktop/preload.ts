@@ -15,6 +15,12 @@ export interface ElectronMiningAPI {
     installationId?: string;
   }>;
   getInstallationId?: () => Promise<string>;
+  getDeviceIdentity?: () => Promise<{
+    installationId: string;
+    createdAt: string;
+    platform: string;
+    version: string;
+  }>;
   detectXMRig: () => Promise<{ found: boolean; path: string | null }>;
   selectXMRigPath: () => Promise<string | null>;
   validateXMRig: (path: string) => Promise<{ valid: boolean; reason?: string }>;
@@ -54,6 +60,7 @@ const miningAPI: ElectronMiningAPI = {
   isElectron: true,
   getSystemInfo: () => ipcRenderer.invoke('mining:get-system-info'),
   getInstallationId: () => ipcRenderer.invoke('mining:get-installation-id'),
+  getDeviceIdentity: () => ipcRenderer.invoke('app:get-device-identity'),
   detectXMRig: () => ipcRenderer.invoke('mining:detect-xmrig'),
   selectXMRigPath: () => ipcRenderer.invoke('mining:select-xmrig-path'),
   validateXMRig: (path: string) => ipcRenderer.invoke('mining:validate-xmrig', path),

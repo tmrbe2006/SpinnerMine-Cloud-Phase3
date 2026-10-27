@@ -293,6 +293,111 @@ export async function handleWorkerRename(request: Request, env: Env): Promise<Re
   }
 }
 
+export async function handleWorkerLinkInstallation(request: Request, env: Env): Promise<Response> {
+  const { user, rawToken } = await authenticateRequest(request, env);
+  const body: any = await request.json().catch(() => ({}));
+  const { workerId, installationId, consentConfirmed } = body;
+
+  if (!workerId || typeof workerId !== 'string') {
+    return new Response(JSON.stringify({ error: 'Valid workerId is required' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  if (!installationId || typeof installationId !== 'string' || !installationId.startsWith('inst_')) {
+    return new Response(JSON.stringify({ error: 'Valid installationId starting with inst_ is required' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  // Requirement 5: Link after explicit user consent
+  if (!consentConfirmed) {
+    return new Response(JSON.stringify({ error: 'Explicit user consent is required to link permanent installation identity' }), {
+      status: 400,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+
+  const safeWorkerId = workerId.trim().replace(/[^a-zA-Z0-9_\-]/g, '');
+  const safeInstallationId = installationId.trim().replace(/[^a-zA-Z0-9_\-]/g, '').slice(0, 64);
+  const serviceToken = await getServiceAccountAccessToken(env);
+  const activeToken = serviceToken || rawToken;
+
+  try {
+    const existingDoc = await getDocument('miningWorkers', safeWorkerId, activeToken, env);
+    if (!existingDoc) {
+      return new Response(JSON.stringify({ error: 'Worker not found' }), {
+        status: 404,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Requirement 3 & 6: Verify Firebase UID and worker ownership
+    if (existingDoc.userId !== user.uid && !user.admin) {
+      return new Response(JSON.stringify({ 
+        error: 'Forbidden: You do not own this worker device',
+        code: 'PERMISSION_DENIED'
+      }), {
+        status: 403,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    // Check if another active worker already has this installationId
+    const userWorkers = await queryCollection(
+      'miningWorkers',
+      { field: 'userId', op: 'EQUAL', value: user.uid },
+      activeToken,
+      env
+    );
+    const conflictingWorker = userWorkers.find((w: any) => 
+      w.id !== safeWorkerId && 
+      w.workerId !== safeWorkerId && 
+      w.installationId === safeInstallationId && 
+      !w.isArchived && 
+      !w.mergedInto
+    );
+
+    if (conflictingWorker) {
+      return new Response(JSON.stringify({ 
+        error: `Conflict: Installation ID is already assigned to active worker ${conflictingWorker.id || conflictingWorker.name}. Please resolve duplicate devices first.`,
+        code: 'ALREADY_EXISTS'
+      }), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' }
+      });
+    }
+
+    const now = new Date().toISOString();
+    // Requirement 4, 9, 10: Preserve workerId, acceptedShares, retain all fields, zero financial impact
+    await setDocument('miningWorkers', safeWorkerId, {
+      installationId: safeInstallationId,
+      installationLinkedAt: now,
+      updatedAt: now
+    }, activeToken, env, true);
+
+    return new Response(JSON.stringify({
+      success: true,
+      workerId: safeWorkerId,
+      installationId: safeInstallationId,
+      name: existingDoc.name,
+      retainedAcceptedShares: existingDoc.acceptedShares || 0,
+      financialBalanceImpact: 0,
+      message: `Permanent installation ID successfully linked to worker ${safeWorkerId}.`
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  } catch (err: any) {
+    return new Response(JSON.stringify({ error: `Failed to link installation ID: ${err.message}` }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json' }
+    });
+  }
+}
+
 export async function handleWorkerDuplicates(request: Request, env: Env): Promise<Response> {
   const { user, rawToken } = await authenticateRequest(request, env);
   const serviceToken = await getServiceAccountAccessToken(env);

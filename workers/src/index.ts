@@ -8,7 +8,8 @@ import {
   handleWorkerRename,
   handleWorkerDuplicates,
   handleWorkerArchive,
-  handleWorkerMerge
+  handleWorkerMerge,
+  handleWorkerLinkInstallation
 } from './routes/workers';
 import { handleSpinWheel, handleVerifySpinner } from './routes/games';
 import { handlePoolStatus, handlePoolConfig, handleTestPool } from './routes/mining';
@@ -101,6 +102,8 @@ export async function handleRequest(request: Request, env: Env): Promise<Respons
       response = await handleWorkerArchive(request, env);
     } else if (path === '/api/workers/merge' && method === 'POST') {
       response = await handleWorkerMerge(request, env);
+    } else if (path === '/api/workers/link-installation' && method === 'POST') {
+      response = await handleWorkerLinkInstallation(request, env);
     } else if (path === '/api/workers' && method === 'GET') {
       response = await handleWorkersList(request, env);
     } else if (path === '/api/workers/telemetry' && method === 'POST') {

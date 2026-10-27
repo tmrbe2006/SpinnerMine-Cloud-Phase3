@@ -12,15 +12,22 @@ import { MiningWorker } from '../types';
 
 const STORAGE_KEY_INSTALLATION_ID = 'spinnermine_installation_id';
 
+let cachedInstallationId: string | null = null;
+
 /**
- * Generates a crypto-random hex installation ID (16 hex chars prefixed with inst_)
+ * Generates a cryptographically secure UUID installation ID prefixed with inst_
  */
 export function generateRandomInstallationId(): string {
-  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
-    const bytes = new Uint8Array(8);
-    crypto.getRandomValues(bytes);
-    const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
-    return `inst_${hex}`;
+  if (typeof crypto !== 'undefined') {
+    if (typeof crypto.randomUUID === 'function') {
+      return `inst_${crypto.randomUUID()}`;
+    }
+    if (typeof crypto.getRandomValues === 'function') {
+      const bytes = new Uint8Array(16);
+      crypto.getRandomValues(bytes);
+      const hex = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+      return `inst_${hex}`;
+    }
   }
   const part1 = Math.random().toString(16).slice(2, 10);
   const part2 = Date.now().toString(16).slice(-8);
@@ -28,18 +35,32 @@ export function generateRandomInstallationId(): string {
 }
 
 /**
+ * Checks if a given string is a valid permanent installation identifier.
+ */
+export function isPermanentInstallationId(id?: string | null): boolean {
+  if (!id || typeof id !== 'string') return false;
+  const clean = id.trim();
+  return clean.startsWith('inst_') && clean.length >= 10;
+}
+
+/**
  * Retrieves the stable installation ID for the current running client.
- * In Electron: loads from persistent spinnermine_settings.json via IPC.
+ * In Electron: loads from persistent device-identity.json / settings via IPC.
  * In Web/Browser fallback: loads from localStorage or initializes a persistent one.
  */
 export async function getDeviceInstallationId(): Promise<string> {
+  if (cachedInstallationId && isPermanentInstallationId(cachedInstallationId)) {
+    return cachedInstallationId;
+  }
+
   // 1. Electron Native Desktop IPC
   if (typeof window !== 'undefined') {
     const api = window.electronMiningAPI || window.electronAPI;
     if (api && typeof api.getInstallationId === 'function') {
       try {
         const id = await api.getInstallationId();
-        if (id && typeof id === 'string' && id.startsWith('inst_')) {
+        if (id && typeof id === 'string' && isPermanentInstallationId(id)) {
+          cachedInstallationId = id;
           return id;
         }
       } catch (err) {
@@ -52,17 +73,20 @@ export async function getDeviceInstallationId(): Promise<string> {
   try {
     if (typeof localStorage !== 'undefined') {
       let stored = localStorage.getItem(STORAGE_KEY_INSTALLATION_ID);
-      if (!stored || !stored.startsWith('inst_')) {
+      if (!stored || !isPermanentInstallationId(stored)) {
         stored = generateRandomInstallationId();
         localStorage.setItem(STORAGE_KEY_INSTALLATION_ID, stored);
       }
+      cachedInstallationId = stored;
       return stored;
     }
   } catch {
     // Memory fallback
   }
 
-  return 'inst_web_fallback';
+  const fallback = generateRandomInstallationId();
+  cachedInstallationId = fallback;
+  return fallback;
 }
 
 /**
